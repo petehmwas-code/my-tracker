@@ -1,0 +1,168 @@
+import streamlit as st
+import pandas as pd
+import os
+from datetime import datetime, date
+
+# --- Configuration ---
+FILE_NAME = 'earnings.csv'
+BASE_CURRENCY = "KES"  # The currency used for total calculations
+
+# Approximate manual rates (You can update these in the sidebar)
+DEFAULT_RATES = {
+    "KES": 1.0,
+    "USD": 129.0,
+    "EUR": 151.0,
+    "GBP": 172.0
+}
+
+st.set_page_config(page_title="Global Income Tracker", layout="wide", page_icon="🌍")
+
+# --- Data Handling Functions ---
+def load_data():
+    if not os.path.exists(FILE_NAME):
+        # Added Currency, Rate, Normalized_Amount, Payment_Mode columns
+        df = pd.DataFrame(columns=[
+            'Date', 'Source', 'Amount', 'Currency', 'Exchange_Rate', 
+            'Normalized_Amount', 'Payment_Mode', 'Category', 'Status', 'Notes'
+        ])
+        df.to_csv(FILE_NAME, index=False)
+        return df
+    
+    df = pd.read_csv(FILE_NAME)
+    df['Date'] = pd.to_datetime(df['Date']).dt.date
+    return df
+
+def save_data(df):
+    df.to_csv(FILE_NAME, index=False)
+
+# --- Sidebar: Data Entry ---
+st.sidebar.header("📝 Add Transaction")
+
+with st.sidebar.form("entry_form", clear_on_submit=True):
+    # Row 1: Basics
+    c1, c2 = st.columns(2)
+    entry_date = c1.date_input("Date", date.today())
+    status = c2.selectbox("Status", ["Paid", "Pending"])
+
+    # Row 2: Source & Money
+    source = st.text_input("Source (Client/Platform)")
+    
+    col_amt, col_curr = st.columns([2, 1])
+    amount = col_amt.number_input("Amount", min_value=0.0, step=10.0)
+    currency = col_curr.selectbox("Currency", list(DEFAULT_RATES.keys()))
+    
+    # Auto-fill exchange rate based on selection, but allow manual override
+    default_rate = DEFAULT_RATES.get(currency, 1.0)
+    exchange_rate = st.number_input(f"Exchange Rate (1 {currency} = ? {BASE_CURRENCY})", value=float(default_rate))
+    
+    # Row 3: Details
+    payment_mode = st.selectbox("Payment Mode", ["M-Pesa", "Bank Transfer", "Google Pay", "PayPal", "Cash", "Crypto", "Cheque"])
+    category = st.selectbox("Category", ["Freelance", "Salary", "Investment", "Product Sale", "Consulting", "Other"])
+    notes = st.text_area("Notes")
+    
+    submitted = st.form_submit_button("Save Transaction")
+    
+    if submitted:
+        # Calculate the normalized amount for the dashboard
+        normalized_amount = amount * exchange_rate
+        
+        new_data = pd.DataFrame([{
+            'Date': entry_date, 
+            'Source': source, 
+            'Amount': amount,
+            'Currency': currency,
+            'Exchange_Rate': exchange_rate,
+            'Normalized_Amount': normalized_amount,
+            'Payment_Mode': payment_mode,
+            'Category': category, 
+            'Status': status, 
+            'Notes': notes
+        }])
+        
+        current_df = load_data()
+        updated_df = pd.concat([current_df, new_data], ignore_index=True)
+        save_data(updated_df)
+        st.sidebar.success(f"Saved! Value: {normalized_amount:,.2f} {BASE_CURRENCY}")
+
+# --- Main Dashboard ---
+st.title(f"🌍 Income Tracker ({BASE_CURRENCY})")
+
+df = load_data()
+
+if not df.empty:
+    # Filter for PAID items for financial calc
+    paid_df = df[df['Status'] == 'Paid']
+    
+    # --- KPIs ---
+    today = date.today()
+    current_month = today.strftime("%Y-%m")
+    current_year = today.year
+    
+    # Helper columns for filtering
+    paid_df['Month_Str'] = pd.to_datetime(paid_df['Date']).dt.strftime("%Y-%m")
+    paid_df['Year_Int'] = pd.to_datetime(paid_df['Date']).dt.year
+    
+    # SUM THE NORMALIZED AMOUNT (Not the raw amount)
+    income_today = paid_df[paid_df['Date'] == today]['Normalized_Amount'].sum()
+    income_month = paid_df[paid_df['Month_Str'] == current_month]['Normalized_Amount'].sum()
+    income_ytd = paid_df[paid_df['Year_Int'] == current_year]['Normalized_Amount'].sum()
+
+    # Display Metrics
+    kpi1, kpi2, kpi3 = st.columns(3)
+    kpi1.metric("Income Today", f"{BASE_CURRENCY} {income_today:,.0f}")
+    kpi2.metric("Income This Month", f"{BASE_CURRENCY} {income_month:,.0f}")
+    kpi3.metric("Total YTD Income", f"{BASE_CURRENCY} {income_ytd:,.0f}")
+    
+    st.divider()
+
+    # --- Charts ---
+    c1, c2 = st.columns(2)
+    
+    with c1:
+        st.subheader("Daily Income (Normalized)")
+        month_data = paid_df[paid_df['Month_Str'] == current_month]
+        if not month_data.empty:
+            # Chart using Normalized Amount
+            daily_chart = month_data.groupby('Date')['Normalized_Amount'].sum()
+            st.bar_chart(daily_chart)
+        else:
+            st.info("No paid income this month.")
+
+    with c2:
+        st.subheader("Income by Payment Mode")
+        # Chart to see where money is coming from (M-Pesa vs Bank etc)
+        mode_chart = paid_df.groupby('Payment_Mode')['Normalized_Amount'].sum()
+        st.bar_chart(mode_chart)
+
+    # --- Data Table ---
+    st.subheader("Recent Ledger")
+    
+    # Simple Filters
+    col_f1, col_f2 = st.columns(2)
+    with col_f1:
+        filter_status = st.multiselect("Status", options=df['Status'].unique(), default=df['Status'].unique())
+    with col_f2:
+        filter_mode = st.multiselect("Payment Mode", options=df['Payment_Mode'].unique(), default=df['Payment_Mode'].unique())
+    
+    # Apply Filters
+    filtered_view = df[
+        (df['Status'].isin(filter_status)) & 
+        (df['Payment_Mode'].isin(filter_mode))
+    ].sort_values(by='Date', ascending=False)
+    
+    # Show specific columns for cleanliness
+    display_cols = ['Date', 'Source', 'Amount', 'Currency', 'Payment_Mode', 'Status', 'Normalized_Amount']
+    st.dataframe(filtered_view[display_cols], use_container_width=True)
+
+    if st.button("Delete Last Entry"):
+        if not df.empty:
+            df = df.iloc[:-1]
+            save_data(df)
+            st.rerun()
+        else:
+            st.warning("Ledger is empty.")
+
+else:
+    st.info("No data found. Add your first transaction in the sidebar.")streamlit
+pandas
+matplotlib
